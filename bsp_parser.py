@@ -25,6 +25,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger("bsp_parser")
 
+OTHER_LEGION_TERMS = {
+    "gorgon", "caedere", "barb-hook", "excoriator", "meteor hammer", "falax",
+    "alchem", "banestrike", "vigil pattern", "solarite", "iliastus",
+    "argyrum", "legatine axe", "mantle of ultramar", "artificia kill-switch",
+    "graviton shredder", "burning lore", "warpfire", "tainted weapon",
+    "dark channelling", "cyber-hawk", "shamshir", "power glaive",
+    "calibanite", "terranic", "plasma burner", "stasis",
+    "phoenix", "sonic shrieker", "surgical augment", "palatine",
+    "shrapnel bolter", "shrapnel cannon", "shrapnel pistol", "graviton crusher", "graviton maul",
+    "nostraman", "chainglaive", "trophies of judgement", "preysight", "headsman",
+    "perdition", "frost blade", "frost axe", "frost claw", "frost sword", "fenrisian", "morkai",
+    "carsoran", "justaerin", "dragonscale", "drake-scale", "firedrake", "pyroclast", "pyreclast",
+    "raven's talon", "ravens talon", "raven's claw", "mor deythan", "darkwing", "deliverance",
+    "power dagger", "venom sphere", "deathshroud", "grave warden", "red butchers",
+    "invictarii", "phalanx warder", "templar brethren", "keshig", "varagyr",
+    "gal vorbak", "ashen circle",
+}
+
 OTHER_LEGIONS = {
     "dark angels", "emperor's children", "iron warriors", "white scars",
     "space wolves", "imperial fists", "night lords", "blood angels",
@@ -337,6 +355,9 @@ class BSDataParser:
         for ol in self.excluded_legions:
             if ol in nl:
                 return True
+        for term in OTHER_LEGION_TERMS:
+            if term in nl:
+                return True
         return False
 
     def format_source_ref(self, node: Dict[str, Any]) -> str:
@@ -527,6 +548,8 @@ class BSDataParser:
             if tid in self.categories_by_id:
                 sname = self.categories_by_id[tid]
             if not sname or sname.lower() in ("allegiance", "rite of war", "army configuration"):
+                continue
+            if self.is_other_legion_item(sname):
                 continue
             self.detachment_slot_roles.add(sname)
             min_s, max_s = self.extract_constraints(cl)
@@ -789,6 +812,7 @@ class BSDataParser:
                         se, unit, visited, depth + 1, is_mandatory_context=True
                     )
                 else:
+                    self.collect_unit_profiles_only(se, unit, visited)
                     self.collect_from_node(
                         se, unit, visited, depth + 1, is_mandatory_context=False, group_label=se_name
                     )
@@ -891,6 +915,7 @@ class BSDataParser:
                             target_entry, unit, visited, depth + 1, is_mandatory_context=True
                         )
                     else:
+                        self.collect_unit_profiles_only(target_entry, unit, visited)
                         self.collect_from_node(
                             target_entry, unit, visited, depth + 1, is_mandatory_context=False, group_label=t_name
                         )
@@ -942,11 +967,56 @@ class BSDataParser:
 
         return mandatory_model_pts
 
+    def _is_unit_stat_profile(self, prof: ProfileItem) -> bool:
+        tn = prof.type_name.lower()
+        if any(k in tn for k in ("weapon", "armoury", "wargear", "psychic", "reaction", "trait", "ability")):
+            return False
+        if any(k in tn for k in (
+            "unit", "model", "vehicle", "automata", "knight", "titan",
+            "characteristic", "profile", "infantry", "dreadnought",
+            "walker", "cavalry", "primarch", "paragon"
+        )):
+            return True
+        keys = {k.strip().upper() for k in prof.characteristics.keys()}
+        return "M" in keys and (("WS" in keys and "BS" in keys) or "FRONT ARMOUR" in keys or "FRONT" in keys)
+
+    def collect_unit_profiles_only(self, node: Dict[str, Any], unit: ResolvedUnit, visited: Set[str], depth: int = 0) -> None:
+        if not isinstance(node, dict) or depth > 4:
+            return
+        for p in get_dict_list(node, "profiles", "sharedProfiles"):
+            pid = str(p.get("id") or "")
+            p_item = self.profiles_by_id.get(pid) or ProfileItem(
+                id=pid,
+                name=str(p.get("name") or "").strip(),
+                type_name=str(p.get("typeName") or "").strip(),
+                characteristics=self.extract_characteristics(p),
+                source_ref=self.format_source_ref(p),
+            )
+            if self._is_unit_stat_profile(p_item) and not self.is_other_legion_item(p_item.name):
+                self._assign_profile(p_item, unit)
+        for il in get_dict_list(node, "infoLinks"):
+            tid = str(il.get("targetId") or "")
+            if tid in self.profiles_by_id:
+                target_prof = self.profiles_by_id[tid]
+                if self._is_unit_stat_profile(target_prof) and not self.is_other_legion_item(target_prof.name):
+                    resolved_name = self.resolve_parameterized_name(il, target_prof.name)
+                    cloned = ProfileItem(
+                        id=target_prof.id,
+                        name=resolved_name,
+                        type_name=target_prof.type_name,
+                        characteristics=target_prof.characteristics,
+                        source_file=target_prof.source_file,
+                        source_ref=target_prof.source_ref,
+                    )
+                    self._assign_profile(cloned, unit)
+            elif tid in self.info_groups_by_id and tid not in visited:
+                self.collect_unit_profiles_only(self.info_groups_by_id[tid], unit, visited | {tid}, depth + 1)
+
     def _assign_profile(self, prof: ProfileItem, unit: ResolvedUnit) -> None:
         if not prof.name:
             return
         tn = prof.type_name.lower()
-        if any(k in tn for k in ("unit", "model", "vehicle", "automata", "knight", "titan", "characteristic")):
+        if self._is_unit_stat_profile(prof):
             if not any(p.name == prof.name and p.characteristics == prof.characteristics for p in unit.unit_profiles):
                 unit.unit_profiles.append(prof)
         elif "weapon" in tn or "armoury" in tn:
@@ -1083,7 +1153,7 @@ class BSDataParser:
     def _has_unit_profile(self, node: Dict[str, Any]) -> bool:
         for p in get_dict_list(node, "profiles", "sharedProfiles"):
             tn = str(p.get("typeName") or "").lower()
-            if any(k in tn for k in ("unit", "model", "vehicle")):
+            if any(k in tn for k in ("unit", "model", "vehicle", "profile", "infantry", "dreadnought", "walker", "cavalry", "primarch", "paragon")):
                 return True
         return False
 
@@ -1332,7 +1402,7 @@ class BSDataParser:
                 tn = p.type_name.lower()
                 if "weapon" in tn:
                     armoury_weapons[p.name] = p
-                elif not any(k in tn for k in ("unit", "model", "vehicle")) and p.source_file in armoury_files:
+                elif not self._is_unit_stat_profile(p) and p.source_file in armoury_files:
                     armoury_wargear[p.name] = p
 
         for r in self.rules_by_id.values():
@@ -1388,7 +1458,7 @@ class BSDataParser:
                 tn = p.type_name.lower()
                 if "weapon" in tn:
                     legion_weapons[p.name] = p
-                elif not any(k in tn for k in ("unit", "model", "vehicle")):
+                elif not self._is_unit_stat_profile(p):
                     legion_profiles.append(p)
 
         for fname in legion_files:
@@ -1520,7 +1590,7 @@ class BSDataParser:
                 "system": "Horus Heresy 3rd Edition",
                 "system_slug": "horus_heresy_3e",
                 "faction": self.legion,
-                "parser_version": "4.1",
+                "parser_version": "4.2",
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "errata_applied": self.applied_patches_log,
             },
@@ -1579,7 +1649,7 @@ def main() -> None:
     size_kb = catalog_file.stat().st_size / 1024 if catalog_file.exists() else 0
 
     print(
-        f"\n[SUCCESS] BSData v4.1 Compilation Complete:\n"
+        f"\n[SUCCESS] BSData v4.2 Compilation Complete:\n"
         f"  - JSON Catalog  : {catalog_file} ({size_kb:.1f} KB)\n"
         f"  - Units Indexed : {units_cnt:,} units across Armoury & {args.legion}\n"
         f"  - Detachments   : {dets_cnt:,} Force Org charts with slot constraints\n"
