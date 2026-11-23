@@ -1344,6 +1344,8 @@ class BSDataParser:
                 {"name": p.name, "type": p.type_name, "stats": p.characteristics}
                 for p in unit.unit_profiles
             ],
+            "abilities": sorted({p.name for p in unit.ability_profiles if p.name}),
+            "weapons_ref": sorted({p.name for p in unit.weapon_profiles if p.name}),
         }
         if unit.source_ref:
             unit_dict["source_ref"] = unit.source_ref.replace("*(", "").replace(")*", "")
@@ -1585,12 +1587,77 @@ class BSDataParser:
 
         cult_arcana_options = ["Corvidae", "Athanaean", "Pavoni", "Pyrae", "Raptora", "Osiraean", "Prosperine"]
 
+        # Build compact lookup dictionaries for New Recruit-style Roster Cards (Phase 3)
+        def _clean_ref(sref: str) -> str:
+            return sref.replace("*(Source: ", "").replace("*(", "").replace(")*", "").strip()
+
+        weapons_dict: Dict[str, Dict[str, Any]] = {}
+        wargear_dict: Dict[str, Dict[str, Any]] = {}
+        rules_dict: Dict[str, Dict[str, Any]] = {}
+
+        def _add_weapon(p: ProfileItem) -> None:
+            if not p.name or not p.characteristics or self.is_other_legion_item(p.name):
+                return
+            if p.name not in weapons_dict:
+                entry: Dict[str, Any] = {"type": p.type_name, "stats": p.characteristics}
+                cref = _clean_ref(p.source_ref)
+                if cref:
+                    entry["ref"] = cref
+                weapons_dict[p.name] = entry
+
+        def _add_wargear(p: ProfileItem) -> None:
+            if not p.name or not p.characteristics or self.is_other_legion_item(p.name):
+                return
+            if p.name not in wargear_dict:
+                entry: Dict[str, Any] = {"type": p.type_name, "stats": p.characteristics}
+                cref = _clean_ref(p.source_ref)
+                if cref:
+                    entry["ref"] = cref
+                wargear_dict[p.name] = entry
+
+        def _add_rule(r: RuleItem) -> None:
+            if not r.name or not r.description or self.is_other_legion_item(r.name):
+                return
+            if r.name not in rules_dict:
+                entry: Dict[str, Any] = {"desc": r.description}
+                cref = _clean_ref(r.source_ref)
+                if cref:
+                    entry["ref"] = cref
+                rules_dict[r.name] = entry
+
+        for p in list(armoury_weapons.values()) + list(legion_weapons.values()):
+            _add_weapon(p)
+        for p in list(core_abilities.values()) + list(armoury_wargear.values()) + list(legion_profiles):
+            _add_wargear(p)
+        for r in list(core_rules.values()) + list(armoury_rules.values()) + list(legion_rules.values()):
+            _add_rule(r)
+
+        global_rules_by_base = {}
+        for r in self.rules_by_id.values():
+            if r.name and r.description and not self.is_other_legion_item(r.name):
+                base_k = re.sub(r"\s*\([^)]*\)", "", r.name).strip().lower()
+                global_rules_by_base.setdefault(r.name.lower(), r)
+                global_rules_by_base.setdefault(base_k, r)
+
+        for u in armoury_units + legion_units:
+            for wp in u.weapon_profiles:
+                _add_weapon(wp)
+            for ab in u.ability_profiles:
+                _add_wargear(ab)
+            for ir in u.inline_rules:
+                _add_rule(ir)
+            for rname in u.rule_names:
+                base_k = re.sub(r"\s*\([^)]*\)", "", rname).strip().lower()
+                matched_r = global_rules_by_base.get(rname.lower()) or global_rules_by_base.get(base_k)
+                if matched_r:
+                    _add_rule(matched_r)
+
         roster_catalog = {
             "metadata": {
                 "system": "Horus Heresy 3rd Edition",
                 "system_slug": "horus_heresy_3e",
                 "faction": self.legion,
-                "parser_version": "4.2",
+                "parser_version": "4.3",
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "errata_applied": self.applied_patches_log,
             },
@@ -1603,6 +1670,9 @@ class BSDataParser:
             },
             "detachments": catalog_detachments,
             "units": list(catalog_units_map.values()),
+            "weapons_dict": weapons_dict,
+            "wargear_dict": wargear_dict,
+            "rules_dict": rules_dict,
         }
 
         catalog_json_path = self.output_dir / "roster_catalog.json"
@@ -1649,7 +1719,7 @@ def main() -> None:
     size_kb = catalog_file.stat().st_size / 1024 if catalog_file.exists() else 0
 
     print(
-        f"\n[SUCCESS] BSData v4.2 Compilation Complete:\n"
+        f"\n[SUCCESS] BSData v4.3 Compilation Complete:\n"
         f"  - JSON Catalog  : {catalog_file} ({size_kb:.1f} KB)\n"
         f"  - Units Indexed : {units_cnt:,} units across Armoury & {args.legion}\n"
         f"  - Detachments   : {dets_cnt:,} Force Org charts with slot constraints\n"
